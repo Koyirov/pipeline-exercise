@@ -1,0 +1,146 @@
+image: node:18-bullseye
+
+stages:
+  - build
+  - test
+  - deploy review
+  - deploy staging
+  - deploy production
+  - production test
+  - post
+  - cache
+  - stop review
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+  policy: pull-push
+
+variables:
+  REVIEW_DOMAIN: puny-brass-review.surge.sh
+  STAGING_DOMAIN: puny-brass-staging.surge.sh
+  PRODUCTION_DOMAIN: puny-brass-production.surge.sh
+
+build website:
+  stage: build
+  except:
+    - schedules
+  script:
+    - echo $CI_COMMIT_SHORT_SHA
+    - npm install
+    - npm install -g gatsby-cli
+    - gatsby build
+    - sed -i "s/%%Gatsby%%/$CI_COMMIT_SHORT_SHA/g" ./public/index.html
+  artifacts:
+    paths:
+      - ./public
+
+test artifact:
+  image: alpine
+  stage: test
+  except:
+    - schedules
+  cache:
+    policy: pull
+  script:
+    - grep -q "Gatsby" ./public/index.html
+
+deploy review:
+  stage: deploy review
+  only:
+    - branches
+  environment:
+    name: review
+    url: http://$REVIEW_DOMAIN
+  script:
+    - echo $SURGE_LOGIN
+    - npm install --global surge
+    - surge --project ./public --domain $REVIEW_DOMAIN
+
+
+test website:
+  stage: test
+  except:
+    - schedules
+  script:
+    - npm install
+    - npm install -g gatsby-cli
+    - gatsby serve &
+    - sleep 3
+    - curl "http://localhost:9000" | tac | tac | grep -q "Gatsby"
+
+deploy staging:
+  stage: deploy staging
+  environment:
+    name: staging
+    url: http://$STAGING_DOMAIN
+  only:
+    - master
+    - merge_requests
+  except:
+    - schedules
+  script:
+    - echo $SURGE_LOGIN
+    - npm install --global surge
+    - surge --project ./public --domain $STAGING_DOMAIN
+
+deploy production:
+    stage: deploy production
+    environment:
+      name: production
+      url: http://$PRODUCTION_DOMAIN
+      on_stop: stop review
+    only:
+      - master
+      - merge_requests
+    except:
+      - schedules
+    when: manual
+    allow_failure: false
+    before_script:
+      - npm install --global surge
+    script:
+      - surge --project ./public --domain $PRODUCTION_DOMAIN
+
+production test:
+  image: alpine
+  stage: production test
+  only:
+    - master
+    - merge_request
+  cache:
+    policy: pull
+  except:
+    - schedules
+  script:
+    - apk update && apk add curl
+    - curl "puny-brass.surge.sh" | grep -q "Gatsby"
+#   - curl "puny-brass.surge.sh" | grep -q "$CI_COMMIT_SHORT_SHA"
+    - echo "Everything is working fine"
+
+update job:
+  stage: cache
+  cache:
+    policy: push
+  only:
+    - schedules
+  script:
+    - echo "I am cache updater"
+    - npm install
+    - npm install -g gatsby-cli
+
+stop review:
+  stage: deploy review
+  only:
+    - branches
+    - merge_requests
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - npm install --global surge
+    - surge teardown $REVIEW_DOMAIN
+  when: manual
+  environment:
+    name: production
+    action: stop
